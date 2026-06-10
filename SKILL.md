@@ -596,6 +596,9 @@ instruction_attributes:
   - [ ] 位域字段的 bits 已逐位定义
   - [ ] 动态字段（raw_hex + dynamic: true）已标记
   - [ ] instruction_attributes 已按需配置（codec_override 标记）
+  - [ ] **表具行业协议专项**：所有计量数据（累积量/金额/流量/压力/温度/单价/阀门状态）
+    已逐字段独立定义，含 type/length/unit/scale，未被压缩为 raw_hex
+    （详见 `references/commands-yaml-template.md` 第 13 节）
 
 ### 8.3 Phase 2：Codec 实现
 

@@ -25,7 +25,7 @@
 |------|------|---------|
 | `references/document-analysis-workflow.md` | **Phase 0**: PDF/Word/MD 协议文档系统化分析流程，帧格式/命令表/CRC/安全参数/测试向量的提取方法论 | 拿到新协议文档后**最先阅读** |
 | `references/field-type-mapping.md` | 协议文档类型描述 → 22 种 FieldType 的精确映射表，含字节序决策和配置要点 | 提取命令字段时对照使用 |
-| `references/commands-yaml-template.md` | 从协议文档命令表到可用的 `commands.yaml` 的完整转换模板。**第 12 节专讲 TLV/自描述格式处理** | 编写 commands.yaml 时对照使用 |
+| `references/commands-yaml-template.md` | 从协议文档命令表到可用的 `commands.yaml` 的完整转换模板。**第 12 节专讲 TLV/自描述格式处理**，**第 13 节专讲表具行业（燃气表/水表）计量数据强制解析规则** | 编写 commands.yaml 时对照使用 |
 | `references/test-vector-extraction.md` | 测试向量定位→提取→pytest 契约测试生成，含 CRC 参数反推、往返测试、错误帧测试 | 实现 codec 后立即使用，**解决无法测试的问题** |
 | `references/technical-extension.md` | 代码级细节：完整数据流、三种安全模式代码、同构拷贝、异常处理、测试策略、故障排查 | codec 实现时参考 |
 
