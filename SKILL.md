@@ -5,6 +5,14 @@ description: First-principles guide for integrating a new communication protocol
 
 # ToolsKing 协议接入：第一性原理
 
+> **完整工作流**：本文件是协议接入的架构与实现参考。如果你刚拿到一份新的 PDF/Word/MD 协议文档，请**先按以下顺序阅读参考文档**：
+> 1. `references/document-analysis-workflow.md` — Phase 0: 从文档中系统提取所有实现所需信息
+> 2. `references/field-type-mapping.md` — 把文档中的类型描述映射到框架的 FieldType
+> 3. `references/commands-yaml-template.md` — 生成 commands.yaml
+> 4. 回到本文档 — 理解架构分层，实现 codec
+> 5. `references/test-vector-extraction.md` — 用文档中的 hex dump 编写契约测试
+> 6. `references/technical-extension.md` — 处理同构拷贝、异常路径等特殊情况
+
 ## 目录
 
 1. [分层架构：数据如何流过每一层](#1-分层架构数据如何流过每一层)
@@ -269,4 +277,350 @@ def pack(self, ctx: PackContext) -> bytes:
 
 ### 4.1 类型注册表
 
-`TypeRegistry` 是全局单例，存储 `type_name → FieldType 子类` 映射。所有类型在 `app/core/vali
+`TypeRegistry` 是全局单例，存储 `type_name → FieldType 子类` 映射。所有类型在 `app/infrastructure/validators/core/registry.py` 中管理，在 `app/infrastructure/validators/types/builtin.py` 底部完成注册。
+
+### 4.2 已注册类型完整清单
+
+| 注册名 | 对应类 | 长度(byte) | 说明 |
+|--------|--------|-----------|------|
+| `hex` | `HexField` | 配置决定 | 定长十六进制块，不足自动补 0 |
+| `raw_hex` | `RawHexField` | 动态 | 变长十六进制数据（需配合 `dynamic: true`） |
+| `uint8` | `UInt8Field` | 1 | 无符号 8 位整数 |
+| `uint16` | `UInt16Field` | 2 | 无符号 16 位整数 |
+| `uint32` | `UInt32Field` | 4 | 无符号 32 位整数 |
+| `int16` | `Int16Field` | 2 | 有符号 16 位整数 |
+| `int32` | `Int32Field` | 4 | 有符号 32 位整数 |
+| `string` | `StringField` | 配置决定 | UTF-8 字符串，不足补 `0x00` |
+| `bcd` | `BCDField` | 配置决定 | BCD 编码 |
+| `bcd_u` | `BCDUField` | 配置决定 | 无符号 BCD 编码 |
+| `bcd_u_array` | `BCDUArrayField` | 配置决定 | BCD 数组 |
+| `yymmddhhmmss` | `YYMMDDHHMMSSField` | 6 | 年月日时分秒 BCD |
+| `yymmddhhmm` | `YYMMDDHHMMField` | 5 | 年月日时分 BCD |
+| `yymmddhh` | `YYMMDDHHField` | 4 | 年月日时 BCD |
+| `yymmdd` | `YYMMDDField` | 3 | 年月日 BCD |
+| `hhmmss` | `HHMMSSField` | 3 | 时分秒 BCD |
+| `hhmm` | `HHMMField` | 2 | 时分 BCD |
+| `yymm` | `YYMMField` | 2 | 年月 BCD |
+| `record` | `RecordField` | 配置决定 | 嵌套记录结构 |
+| `record_array` | `RecordArrayField` | 配置决定 | 记录数组 |
+| `bitfield` | `BitField` | 配置决定 | 位域，需配置 `bits` 列表 |
+| `enum` | `EnumField` | 配置决定 | 枚举值，需配置 `enum_values` 映射 |
+
+### 4.3 类型选择决策树
+
+从协议文档中的类型描述到 FieldType 注册名的映射规则：
+
+```
+协议文档描述
+  │
+  ├─ 提到 "十六进制" / "hex" / "原始数据"
+  │   ├─ 固定长度 → hex (length=N)
+  │   └─ 变长（由其他字段指定长度）→ raw_hex + dynamic: true
+  │
+  ├─ 提到 "无符号整数" / "unsigned" / "U8/U16/U32"
+  │   ├─ 1 字节 → uint8
+  │   ├─ 2 字节 → uint16
+  │   └─ 4 字节 → uint32
+  │
+  ├─ 提到 "有符号整数" / "signed" / "S16/S32"
+  │   ├─ 2 字节 → int16
+  │   └─ 4 字节 → int32
+  │
+  ├─ 提到 "字符串" / "ASCII" / "UTF-8" / "字符数组"
+  │   └─ string (length=文档声明的字节数)
+  │
+  ├─ 提到 "BCD" / "8421码" / "压缩BCD"
+  │   ├─ 单个 BCD 值 → bcd_u
+  │   ├─ BCD 数组 → bcd_u_array
+  │   └─ 日期时间 BCD → 按格式选择 yymmddhhmmss / yymmddhhmm / yymmdd / hhmmss 等
+  │
+  ├─ 提到 "位" / "bit" / "bit0~bit7" / "D0~D7"
+  │   └─ bitfield (需逐位列出 bits 配置)
+  │
+  ├─ 提到 "枚举" / "取值: 0=xxx, 1=yyy" / "状态码"
+  │   └─ enum (需列出 enum_values)
+  │
+  └─ 提到 "结构体" / "嵌套" / "TLV"
+      ├─ 单个结构体 → record
+      └─ 结构体数组 → record_array
+```
+
+**字节序注意事项**：
+- 协议文档中 "高字节在前" / "大端" / "MSB first" → `byte_order: big`（默认值）
+- 协议文档中 "低字节在前" / "小端" / "LSB first" → `byte_order: little`
+- 不写 `byte_order` 时默认 `big`
+
+### 4.4 自定义类型扩展
+
+当 22 种内置类型无法覆盖协议需求时（例如特殊的浮点编码、非标准压缩算法），通过继承 `FieldType` 并注册来扩展：
+
+```python
+from app.infrastructure.validators.core.base import FieldType
+from app.infrastructure.validators.core.registry import TypeRegistry
+
+
+class Ieee754SingleField(FieldType):
+    """IEEE 754 单精度浮点 (4 bytes)。"""
+    TYPE_DEF = TypeDefinition(
+        length=4, description="IEEE 754 single-precision float"
+    )
+
+    @classmethod
+    def get_default_value(cls, length: int) -> str:
+        return "0.0"
+
+    def to_bytes(self, value: Any) -> bytes:
+        import struct
+        return struct.pack(">f", float(value))
+
+    def from_bytes(self, data: bytes) -> str:
+        import struct
+        return str(struct.unpack(">f", data)[0])
+
+    # _convert_value, _check_range 按需实现
+
+
+TypeRegistry.register("ieee754_single", Ieee754SingleField)
+```
+
+自定义类型放在 `plugins/<key>/` 目录下，与 codec.py 同级，在 codec 的 `on_load()` 中触发 import 即可完成注册。
+
+---
+
+## 5. 参数模型：持久化与会话的合并规则
+
+### 5.1 参数的三层来源
+
+会话状态 (`ProtocolSession`) 由三个来源合并，优先级从高到低：
+
+```
+优先级 高 → 低
+
+1. ctx.overrides (GUI 高级选项面板单次覆盖)
+     ↓ 覆盖
+2. session.state (运行时协商结果，如注册帧返回的随机码)
+     ↓ 覆盖
+3. session.params (持久化参数 + config.yaml 默认值)
+```
+
+### 5.2 config.yaml 中的参数定义
+
+```yaml
+parameters:
+  des_key:
+    label: "DES 密钥"          # GUI 显示名
+    default: "C83E7386FA4DB629" # 默认值
+    persistent: true            # true=存 settings.json，关闭软件后保留
+    secret: true                # true=GUI 用密码框显示
+    description: "DES-ECB 加密密钥"
+```
+
+参数类型 (`type` 字段) 决定 GUI 用什么控件展示：
+
+| type | GUI 控件 | 适用场景 |
+|------|---------|---------|
+| (不写) | 单行文本框 | 普通字符串/数字参数 |
+| `combo_box` | 下拉框 | 有限选项（需配 `options` 列表） |
+| `line_edit` | 单行输入 | 明确需要行编辑的场景 |
+| `text_edit` | 多行文本 | 长文本/多行参数 |
+
+### 5.3 session 段的默认值注入
+
+```yaml
+session:
+  random_000c: ""           # 运行时协商密钥的占位
+  main_key_default: ""      # 主密钥（默认）
+  main_key_non_default: ""  # 主密钥（非标）
+```
+
+`session` 段的 key 在 `ProtocolFacade.switch_protocol()` 时作为 state 初始值注入。运行时 codec 通过 `session_updates` 写回新值。
+
+### 5.4 参数合并的完整流程
+
+```
+软件启动
+  │
+  ├─ 1. 加载 config.yaml → 解析 parameters 段 → 注入 params
+  ├─ 2. 加载 settings.json → 覆盖 params 中有 persisted 标记的值
+  ├─ 3. 解析 session 段 → 注入 state 初始值
+  │
+协议切换 (switch_protocol)
+  │
+  ├─ 4. 重新执行步骤 1-3
+  │
+每次 send()
+  │
+  ├─ 5. ProtocolSession.snapshot() → {**params, **state} → 作为 ctx.session
+  └─ 6. codec.pack(ctx) 从 ctx.session 取密钥/序列号/地址
+```
+
+---
+
+## 6. UI 契约：界面能做什么，能向下传递什么
+
+### 6.1 GUI 的唯一向下通道
+
+GUI 通过两个渠道向协议层传递信息：
+
+| 渠道 | 路径 | 生命周期 | 用途 |
+|------|------|---------|------|
+| 参数面板 | params → session.snapshot() | 持久化 | 密钥、地址、序列号起始值 |
+| 高级选项 | overrides → PackContext.overrides | 单次发送 | 安全模式覆盖、MID 策略覆盖 |
+
+**GUI 不能直接做的事**：
+- 不能直接修改 codec 内部状态
+- 不能直接构造帧字节
+- 不能绕过 Channel 直接调用 transport.write()
+
+### 6.2 overrides 的声明与传递
+
+在 `commands.yaml` 中声明哪些指令属性可以被 GUI 覆盖：
+
+```yaml
+instruction_attributes:
+  security_mode:
+    values: [auto, plain_mac, cipher_mac, none]
+    codec_override: true      # 标记此属性可通过 overrides 传递
+```
+
+`codec_override: true` 的属性在 `ProtocolChannel.send()` 中从 `field_data` 剥离，放入 `PackContext.overrides`，不参与 BinaryFormatter 序列化。
+
+### 6.3 GUI 展示的元数据来源
+
+| GUI 展示内容 | 数据来源 |
+|-------------|---------|
+| 协议列表 | `ProtocolRegistry` 扫描 `plugins/` 目录 |
+| 协议名 | `config.yaml` 的 `protocol.name` |
+| 命令列表 | `commands.yaml` 的 `commands` 键 |
+| 命令名（中文） | 命令的 `name` 字段或键名 |
+| 字段名（中文） | `fields[].name` |
+| 字段类型信息（提示） | `fields[].type` + `fields[].length` + `fields[].description` |
+| 参数字段 | `config.yaml` 的 `parameters` 段 |
+| 实时数据 | `ParsedFrame` 通过 Qt Signal 推送 |
+
+---
+
+## 7. 接入决策树：同构 vs 异构
+
+### 7.1 判断流程
+
+拿到新协议文档后，按以下顺序判断是走"同构拷贝"还是"全新开发"路径：
+
+```
+新协议文档
+  │
+  ├─ 步骤 1：对比帧格式
+  │   Q: 帧头/帧尾/长度域位置/CRC 算法与已有协议完全一致？
+  │   ├─ 是 → 继续
+  │   └─ 否 → 全新开发 (codec 从头写)
+  │
+  ├─ 步骤 2：对比安全层
+  │   Q: 加密算法/MAC 算法/密钥派生逻辑与已有协议完全一致？
+  │   ├─ 是 → 继续
+  │   └─ 否 → 检查是否可以只替换安全层，帧结构部分仍可复用
+  │       ├─ 帧结构相同，仅安全层不同 → 同构拷贝，替换安全层
+  │       └─ 帧结构也不同 → 全新开发
+  │
+  ├─ 步骤 3：对比命令模型
+  │   Q: 命令表结构（command_id 编码方式、字段序列化规则）与已有协议一致？
+  │   ├─ 是 → **同构拷贝** 从最接近的已有协议拷贝底层文件
+  │   └─ 否 → 全新开发
+  │
+  └─ 步骤 4：确认独立性
+      无论同构还是全新，最终产物必须是独立目录，禁止跨协议 import
+```
+
+### 7.2 同构拷贝的具体步骤
+
+参见 `references/technical-extension.md` 的 C 节，补充以下检查点：
+
+1. 拷贝后必须修改的项（逐项核对）：
+   - [ ] 类名（如果 frame_security.py 中有协议相关的类名）
+   - [ ] 帧头/帧尾常量（HEAD/TAIL）
+   - [ ] command_id 映射表（DID 范围、功能码映射）
+   - [ ] 随机码偏移量和长度（如果安全层有密钥协商）
+   - [ ] MAC 长度
+   - [ ] 默认安全模式
+2. 拷贝后必须保留的项：
+   - CRC 算法实现（如果一致）
+   - 加密/MAC 算法实现（如果一致）
+   - 帧构建/解析的流程代码
+3. 独立性验证：
+   ```python
+   # 在 codec.py 中运行 ast 解析，确认无跨插件 import
+   import ast, sys
+   with open("plugins/new_protocol/codec.py") as f:
+       tree = ast.parse(f.read())
+   for node in ast.walk(tree):
+       if isinstance(node, ast.ImportFrom):
+           if "plugins" in node.module and "new_protocol" not in node.module:
+               print(f"违规跨协议import: {node.module}")
+   ```
+
+### 7.3 完全异构时的全新开发检查清单
+
+见第 8 节"实现检查清单"。
+
+---
+
+## 8. 实现检查清单
+
+### 8.1 Phase 0：文档分析（本 phase 检查点）
+
+- [ ] 协议文档已转为可搜索的文本格式
+- [ ] 帧格式已精确文档化（每个字节的偏移/长度/含义/常量值）
+- [ ] 所有命令的 command_id 已提取
+- [ ] 每个命令的 request/response 字段已提取（名称/类型/长度/字节序）
+- [ ] CRC/校验算法参数已提取（多项式/初始值/校验范围/字节序）
+- [ ] 安全层参数已提取（加密算法/密钥来源/MAC 算法）
+- [ ] 错误码表已提取
+- [ ] 测试向量已提取（至少 3 条：1 条简单请求，1 条含 payload 请求，1 条响应）
+- [ ] 类型映射已完成（协议文档类型 → FieldType 注册名）
+
+### 8.2 Phase 1：配置与命令定义
+
+- [ ] `plugins/<key>/config.yaml` 已创建
+  - [ ] `protocol.name` / `protocol.version` 已填写
+  - [ ] `parameters` 段已定义（密钥、地址等持久化参数）
+  - [ ] `session` 段已定义（运行时状态初始值）
+  - [ ] `frame` 段已定义（帧头/帧尾等常量，如有）
+  - [ ] `security` 段已定义（安全配置，如有）
+- [ ] `config/protocols/<Display Name>/commands.yaml` 已创建
+  - [ ] 所有命令的 request/response 已定义
+  - [ ] 所有字段的 type/length/byte_order/default 已填写
+  - [ ] 枚举字段的 enum_values 已列出
+  - [ ] 位域字段的 bits 已逐位定义
+  - [ ] 动态字段（raw_hex + dynamic: true）已标记
+  - [ ] instruction_attributes 已按需配置（codec_override 标记）
+
+### 8.3 Phase 2：Codec 实现
+
+- [ ] `plugins/<key>/codec.py` 已创建
+  - [ ] `Codec` 类继承 `ProtocolCodec`
+  - [ ] `on_load(config)` 已实现（读取 config.yaml 参数）
+  - [ ] `pack(ctx)` 已实现（payload → 完整帧）
+  - [ ] `unpack(data, session)` 已实现（完整帧 → UnpackResult）
+  - [ ] 需要时覆盖 `split_frames(data)`（字节流粘包处理）
+  - [ ] `explain_decision()` 已实现（安全模式决策的可视化说明）
+- [ ] 安全层完全在 codec 内部处理（框架不感知加解密）
+- [ ] 异常处理：pack 失败抛 `ProtocolPackError`，unpack 失败抛 `ProtocolUnpackError`
+- [ ] 无跨协议 import（独立性验证通过 ast 检查）
+
+### 8.4 Phase 3：测试
+
+- [ ] 契约测试：从协议文档提取的测试向量已转为 pytest
+  - [ ] 每条向量测试：`codec.pack()` 输出与 hex dump 逐字节一致
+  - [ ] 每条向量测试：`codec.unpack()` 解析结果与文档字段一致
+- [ ] 单元测试：`test_pack_minimal` / `test_unpack_valid`
+- [ ] 异常路径测试：CRC 错误 / MAC 错误 / 帧头错误
+- [ ] 集成测试：`MockTransport + ProtocolChannel` 收发闭环
+- [ ] 往返测试：`pack → unpack` 后 payload 不变
+
+### 8.5 Phase 4：验证与交付
+
+- [ ] 在 GUI 中协议列表可看到新协议
+- [ ] 命令列表正确加载
+- [ ] 参数面板正确展示
+- [ ] 发送简单命令可看到帧出现在日志中
+- [ ] 如有可能，与真实设备联调验证
+- [ ] 更新 `docs/references/` 下的协议参考文档
