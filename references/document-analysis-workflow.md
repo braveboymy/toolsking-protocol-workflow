@@ -270,11 +270,16 @@ command_id: 0x<hex>  (文档中可能的写法: 0x0001 / 00 01 / 0001H / 01H)
   dynamic: true
 ```
 
-**陷阱 5：变长帧**
+**陷阱 5：变长帧与自描述格式（TLV）**
 
 如果整个帧的长度可变（不是固定命令+固定字段），需要判断：
 - 仅 `data` 字段变长 → 使用 `raw_hex` + `dynamic: true`
-- 整个字段结构可变（如 TLV 格式）→ 可能需要 `record_array` 或在 codec 中用 `decoded_fields_mode: replace` 自行解析
+- 整个字段结构可变（如 TLV 格式：Tag + Length + ID + Data）→ 需要特殊处理。
+  **详细操作指南见 `commands-yaml-template.md` 第 12 节**，包括：
+  - 如何识别自描述格式（§12.1）
+  - `decoded_fields_mode` 决策树（§12.2）
+  - `merge` 和 `replace` 模式下的字段定义粒度（§12.3–12.4）
+  - codec 与 commands.yaml 的 key 名契约（§12.5）
 
 **陷阱 6：可选字段**
 

@@ -3,6 +3,9 @@
 配合 `protocol-integration-workflow` 和 `document-analysis-workflow.md` 使用。
 本文档覆盖从协议文档中的命令表到可用的 `commands.yaml` 的完整转换流程。
 
+**重要**：第 1-11 节面向**固定 schema** 协议（字段按固定顺序出现）。
+如果你的协议使用 **TLV / Tag-Length-Value** 自描述格式，请从第 12 节开始阅读。
+
 ---
 
 ## 1. commands.yaml 文件结构总览
@@ -512,3 +515,225 @@ def build_commands_yaml(index_csv, fields_dir):
 - [ ] 字节序与协议文档一致
 - [ ] 所有字段的 `length` 与实际字节数一致
 - [ ] 字段 type 在 TypeRegistry 中已注册（或计划注册新类型）
+
+---
+
+## 12. TLV / 自描述载荷的处理策略
+
+第 6 节"字段顺序 = 字节顺序"适用于**固定 schema** 协议——每个字段按固定偏移出现在帧中。
+当协议使用 **TLV（Tag-Length-Value）**、**key-value**、**Tagged Union** 等自描述格式时，
+字段不再靠"第几个字节"定位，而是靠 **Tag/ID 标识**。这时候需要不同的策略。
+
+### 12.1 自描述格式的识别信号
+
+在协议文档中发现以下特征时，说明载荷是自描述格式，不能简单用 `fields` 数组按序定义：
+
+| 信号 | 示例 |
+|------|------|
+| 数据域有 Tag + Length 头 | `Tag(1) + Length(2) + Data(n)` |
+| 字段用 ID 号标识，不是按偏移描述 | `ID=0 表示 IMEI, ID=1 表示 IMSI` |
+| 文档写"可选字段"、"按需上报" | `"报警状态每日必须上传一次"` 、 `"密集数据根据需要上传"` |
+| 同一个命令的响应，不同表型返回不同字段集 | `"仅适用于超声波表或流量计"` |
+| 字段可以乱序出现 | 文档未规定"字段出现的先后顺序" |
+| 存在嵌套子结构且子记录数可变 | `BYTE[4*N]` — N 由另一个字段决定 |
+
+**注意**：仅 `data` 段变长（长度字段 + raw_hex）不算自描述格式——那仍属于固定 schema，
+按第 5.2 节"变长 hex 数据"处理即可。自描述格式的核心特征是**字段存在性和顺序不固定**。
+
+### 12.2 `decoded_fields_mode` 决策树
+
+```
+协议 payload 结构
+  │
+  ├─ 每个字段都在固定位置，总出现，顺序固定
+  │   → mode: "schema"（默认）
+  │   → commands.yaml: 完整 fields 数组，BinaryFormatter 全权序列化/反序列化
+  │   → 字段定义粒度: 每个字节都要在 fields 中出现
+  │
+  ├─ 部分字段固定 + 部分字段可选/变长（如 TLV）
+  │   → mode: "merge"
+  │   → commands.yaml: 定义所有**可能**出现的字段（含固定字段 + 可选字段的元数据）
+  │   → codec: 在 decoded_fields 中填入**实际出现**的字段值
+  │   → 框架: schema 字段打底，decoded_fields 的同名键覆盖值
+  │
+  └─ 字段结构完全不由 commands.yaml 描述（加密 blob、复杂嵌套、自定义编码）
+      → mode: "replace"
+      → commands.yaml: 最小定义（命令名 + command_id），fields 可为空或仅含占位 raw_hex
+      → codec: 全权负责解析，decoded_fields 完整构建展示用字段
+      → 框架: 完全使用 decoded_fields，忽略 schema
+```
+
+**关键判断**：如果你的 codec 需要写 `_build_decoded_fields()` 来解析 TLV，那你就处于 `merge` 或 `replace` 分支，
+不再是 `schema` 分支。`schema` 分支下 codec 不需要构建 `decoded_fields`。
+
+### 12.3 `merge` 模式下的字段定义粒度
+
+`merge` 是最常用的自描述格式模式。要点：
+
+**REQ（下行/请求）字段**：
+- 用户需要通过 GUI 填写的每个参数，都必须定义为独立字段
+- 包括嵌套子结构的每一层——不要压缩成 `raw_hex`
+- 示例（查询气表历史数据的 REQ）：
+  ```yaml
+  # 好 — 用户能逐个填写
+  request:
+    command_id: "0x0004"
+    fields:
+      - name: 查询起始时间
+        type: yymmdd
+        length: 3
+        description: BCD码，精确到天，格式YYMMDD
+      - name: 查询模式
+        type: enum
+        length: 1
+        enum_values: {"0": "按天查询", "1": "按月查询"}
+      - name: 查询个数
+        type: uint8
+        length: 1
+        description: 按天最大31天，按月最大60月
+  ```
+
+**RSP（上行/响应）字段**：
+- 定义所有**可能**出现的字段的全量元数据（即使某次响应中不一定全有）
+- 每个可选字段的 `description` 中标注其 TLV Tag/ID 来源
+- 固定字段（如 result_code）按正常位置列出
+- 示例（数据上报 RSP 的部分字段）：
+  ```yaml
+  # 好 — 列出 TLV 中可能出现的字段，codec 的 decoded_fields 会填入实际值
+  response:
+    command_id: "0x0081"
+    fields:
+      - name: IMEI
+        type: bcd_u
+        length: 8
+        description: Tag 0x01 ID=0, 8字节BCD, 最高位补0
+      - name: IMSI
+        type: bcd_u
+        length: 8
+        description: Tag 0x01 ID=1
+      - name: RSRP
+        type: uint16
+        length: 2
+        description: Tag 0x02 ID=0, 信号强度, 取绝对值
+      - name: 主电电压
+        type: uint16
+        length: 2
+        unit: "0.01V"
+        scale: 0.01
+        description: Tag 0x02 ID=6, 扩大100倍上传
+      # ... 逐一列出 Tag 0x01~0x05 的所有子记录
+  ```
+
+**原则**：
+- 如果字段值来自 `decoded_fields`，其类型定义（type/length/unit/scale）主要服务于 GUI 展示格式，
+  不影响反序列化逻辑（反序列化由 codec 完成）
+- `description` 必须标注 TLV 来源（Tag + ID），方便后续维护时对照协议文档
+
+### 12.4 `replace` 模式下的字段定义粒度
+
+当 codec 全权负责解析时（如 100 协议的记录数据、加密后的嵌套结构）：
+
+```yaml
+# replace 模式 — commands.yaml 只需最小定义
+response:
+  command_id: "0x0081"
+  fields:
+    - name: 数据摘要
+      type: string
+      length: 0
+      dynamic: true
+      description: 由 codec 解析 TLV 后提供的结构化数据摘要
+```
+
+**`replace` vs `merge` 的选择**：
+- 当字段很多（>30种）、结构深层嵌套、或不同表型返回完全不同的字段集时 → 倾向 `replace`
+- 当字段类型稳定、主要差异在"有无"而非"结构"时 → 倾向 `merge`（GUI 能利用 schema 的 unit/scale/enum_values 元数据）
+
+### 12.5 codec ↔ commands.yaml 的契约
+
+使用 `merge` 模式时，codec 返回的 `decoded_fields` 的 **key 名必须与 `fields[].name` 完全一致**：
+
+```python
+# codec.py — unpack() 中
+decoded_fields = {
+    "IMEI": "0866674051156284",      # 必须匹配 commands.yaml 中 fields[].name
+    "IMSI": "0460113240741862",
+    "RSRP": 1,
+    "主电电压": 24.36,                # codec 已除以 100 的最终值
+}
+return UnpackResult(
+    command_id=func_code,
+    payload=tlv_data,
+    decoded_fields=decoded_fields,
+    decoded_fields_mode="merge",
+)
+```
+
+```yaml
+# commands.yaml — 对应的字段定义
+- name: IMEI          # ← key 必须匹配
+  type: bcd_u
+  length: 8
+- name: IMSI
+  type: bcd_u
+  length: 8
+- name: RSRP
+  type: uint16
+  length: 2
+- name: 主电电压        # ← key 必须匹配
+  type: uint16
+  length: 2
+  unit: V
+  scale: 0.01
+```
+
+**契约规则**：
+1. `decoded_fields` 的 key 与 `fields[].name` 同名时 → 框架用 decoded_fields 的值覆盖 schema 解析值
+2. `decoded_fields` 有但 schema 没有的 key → 框架仍会加入最终字段（但没有 type/length 元数据，GUI 显示为原始值）
+3. schema 有但 `decoded_fields` 没有的 key → 框架尝试用 BinaryFormatter 从 payload 解析（通常失败/跳过）
+
+**最佳实践**：codec 只返回实际出现的字段，不返回未出现的字段（值为 `None` 或空字符串）。
+这样 GUI 不会被大量空值占满。
+
+### 12.6 TLV 协议 commands.yaml 编写流程
+
+```
+Phase 0 产出: 协议文档分析 → 整理出所有 TLV Tag 及其子记录表
+    │
+    ▼
+步骤 1: 确定每条命令 (func_code) 的数据域包含哪些 TLV Tag
+    │  例: 0x01(数据上报) → Tag 0x01, 0x02, 0x03, 0x04, 0x05
+    │       0x03(查询信息) → Tag 0x01, 0x06
+    │
+    ▼
+步骤 2: 罗列每个 Tag 的所有子记录 ID、名称、类型、长度
+    │  例: Tag 0x02 ID=6 → 主电电压, uint16, 2B, 0.01V
+    │
+    ▼
+步骤 3: 为 REQ (下行) 定义用户需要填写的字段
+    │  原则: 每个可填参数独立列为一个字段
+    │
+    ▼
+步骤 4: 为 RSP (上行) 定义全量子记录字段
+    │  原则: 所有可能出现的子记录都列出（即使不总出现）
+    │  每个字段的 description 标注 Tag/ID 来源
+    │
+    ▼
+步骤 5: 确认 codec 的 decoded_fields key 名与 fields[].name 一致
+    │
+    ▼
+步骤 6: 走验证检查清单（见下方 12.7）
+```
+
+### 12.7 TLV 模式验证检查清单
+
+在标准检查清单（第 11 节）之外，TLV 模式额外核对：
+
+- [ ] 已判断协议属于固定 schema / `merge` / `replace` 哪种模式
+- [ ] 数据域的每个 TLV Tag 都有对应的字段定义（在 description 中标注了 Tag/ID）
+- [ ] REQ 字段粒度足够用户逐项填写（没有把多个参数压缩成一个 raw_hex）
+- [ ] RSP 字段名称与 codec `decoded_fields` 的 key 名一致
+- [ ] codec 只返回实际出现的字段，不返回空值占位
+- [ ] 可选字段的 `description` 中注明了适用条件（如"仅超声波表"）
+- [ ] `decoded_fields_mode` 在 codec 返回时显式指定为 `"merge"` 或 `"replace"`
+- [ ] 如果字段值由 codec 计算（如除以 scale 后的最终值），已确认 codec 的值与 schema 的 scale 不重复应用

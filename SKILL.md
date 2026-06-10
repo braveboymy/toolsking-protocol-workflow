@@ -172,6 +172,10 @@ ProtocolChannel._on_raw_data(data)
 | `replace` | 用 decoded_fields 完全替代 schema 解析 | 协议层自行完成所有解析（如 100 协议记录数据） |
 | `merge` | schema 解析打底，decoded_fields 覆盖同名键 | 部分字段需要 codec 特殊处理 |
 
+> **如何选择模式**：如果你的协议使用 TLV / Tag-Length-Value 自描述格式，
+> 请参考 `references/commands-yaml-template.md` **第 12 节**，其中包含完整的决策树（§12.2）、
+> 各模式下的字段定义粒度指南（§12.3–12.4）、以及 codec ↔ commands.yaml 的 key 名契约（§12.5）。
+
 ### 2.3 split_frames：多帧拆分
 
 默认 `split_frames(data) → [data]`，即假设一次回调=一帧。
