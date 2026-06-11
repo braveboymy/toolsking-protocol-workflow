@@ -1,82 +1,143 @@
 # 协议接入技术扩展参考
 
-配合 protocol-integration-workflow skill 使用。
+> 📏 ~1,200 tokens | 必读等级: ★★☆（Phase 2 对照用）| 前置: SKILL.md §2, §3
+> ⏩ 同构拷贝 → 读 §B；全新开发 → 读 §A；排错 → 读 §E
+
+配合 `protocol-integration-workflow` skill 使用。
+
+本文档仅包含**代码级细节**。架构原理、安全模式、同构决策树等已在 SKILL.md 中完整覆盖：
+- **PackContext / UnpackResult / decoded_fields_mode** → SKILL.md §2
+- **安全层三种模式（加密管线、密钥派生）** → SKILL.md §3
+- **同构 vs 异构决策树** → SKILL.md §7
+- **参数模型与 UI 契约** → SKILL.md §5-§6
 
 ---
 
-## A. PackContext 与 UnpackResult：完整数据流
+## A. Codec 分步实现指南
 
-### A.1 发送端
+从零开始实现一个 codec，按复杂度递增分四步。每步完成后再进入下一步，每步可通过契约测试独立验证。
 
-GUI -> Facade -> 剥离 codec_override -> Runtime.send -> Channel.send
-  -> CommandStore -> DirectionDef
-  -> BinaryFormatter -> payload bytes
-  -> PackContext(command_id, payload, is_uplink, session, overrides)
-  -> codec.pack(ctx) -> frame bytes -> transport.write
+### A.1 第 1 步：定长帧（无校验、无安全层）
 
-### A.2 接收端
+**目标**：验证帧格式理解正确，payload 字节级往返一致。
 
-transport callback -> Channel._on_raw_data
-  -> codec.split_frames -> [frame]
-  -> codec.unpack -> UnpackResult
-  -> session.apply_updates
-  -> CommandStore.get_by_id -> command_name
-  -> _deserialise_payload -> field dict
-  -> ParsedFrame -> callbacks -> Facade signal
+```python
+from app.infrastructure.protocol.abc import PackContext, ProtocolCodec, UnpackResult
+from app.infrastructure.protocol.exceptions import ProtocolPackError, ProtocolUnpackError
 
----
+HEAD = b"\x68"
+TAIL = b"\x16"
 
-## B. 安全层实现模式
+def _calc_xor(data: bytes) -> int:
+    result = 0
+    for b in data:
+        result ^= b
+    return result & 0xFF
 
-### B.1 无安全层（HIL协议）
+class Codec(ProtocolCodec):
+    def on_load(self, config: dict) -> None:
+        pass  # 第 1 步不需要任何配置
 
-payload -> CRC16 -> 嵌入帧。codec内部完成CRC计算和校验。
+    def pack(self, ctx: PackContext) -> bytes:
+        # 帧结构: HEAD + LEN(1B) + CMD(2B) + PAYLOAD + CS(1B, XOR) + TAIL
+        cmd_bytes = ctx.command_id.to_bytes(2, "big")
+        payload = ctx.payload
+        length = 2 + len(payload)  # CMD + PAYLOAD 的字节数
+        body = bytes([length]) + cmd_bytes + payload
+        cs = _calc_xor(body)
+        return HEAD + body + bytes([cs]) + TAIL
 
-### B.2 单层安全（新金卡协议）
-
-payload -> DES-ECB加密前8字节 -> CRC16 -> CS校验。用construct的Subconstruct声明式定义安全层。
-
-### B.3 双层安全（100协议/gh_protocol）
-
-payload -> AES-ECB+PKCS7 -> HMAC-SHA256 MAC -> CRC16。
-安全模式按功能码+方向自动决策（04H下行=none, 05H下行=cipher_mac, 09H=plain_mac）。
-密钥派生：enc_key=HMAC-SHA256(主密钥,随机码)[:16], mac_key=AES(主密钥,随机码)[:16]。
-
-### B.4 安全覆盖
-
-```yaml
-instruction_attributes:
-  security_mode:
-    values: [auto, plain_mac, cipher_mac, none]
-    codec_override: true
+    def unpack(self, data: bytes, session: dict) -> UnpackResult:
+        if len(data) < 6 or data[0:1] != HEAD or data[-1:] != TAIL:
+            raise ProtocolUnpackError("invalid frame")
+        length = data[1]
+        body = data[2:-2]  # 去掉 HEAD, CS, TAIL
+        if _calc_xor(body) != data[-2]:
+            raise ProtocolUnpackError("CS mismatch")
+        cmd_id = int.from_bytes(body[1:3], "big")
+        payload = body[3:]
+        return UnpackResult(command_id=cmd_id, payload=payload)
 ```
 
+**验证点**：
+- `pack → unpack` 往返后 payload 不变
+- 帧长度精确等于 HEAD + 1 + 2 + len(payload) + 1 + TAIL
+- 用协议文档的 hex dump 测试 pack 输出逐字节匹配
+
+### A.2 第 2 步：加 CRC
+
+**目标**：在第 1 步基础上，将简单 XOR 校验替换为标准 CRC。
+
+```python
+# 追加到 codec.py
+from crccheck.crc import Crc16Modbus  # 或其他 CRC 算法
+
+def _calc_crc16(data: bytes) -> bytes:
+    crc = Crc16Modbus.calc(data)
+    return crc.to_bytes(2, "big")
+```
+
+修改 `pack()` 中 CS 计算为 `_calc_crc16(body)`，修改 `unpack()` 中的 CS 校验逻辑。
+
+**CRC 算法选择**：如果协议文档未明确 CRC 参数（多项式、初始值），
+可用穷举法确定（详见 `references/test-vector-extraction.md` §4）。
+
+### A.3 第 3 步：加安全层
+
+**目标**：在帧结构中嵌入加密和 MAC。
+
+此时代码量显著增加。建议将安全逻辑抽到独立模块（如 `frame_security.py`），
+codec.py 只做编排。详见 SKILL.md §3 的三种模式选择，以及本文档 §C 的同构拷贝方案
+（如果安全层与已有协议一致，直接拷贝后修改）。
+
+### A.4 第 4 步：加 session_updates 和 decoded_fields
+
+**目标**：处理密钥协商、表型提取、TLV 解析等需要会话状态的逻辑。
+
+```python
+def unpack(self, data: bytes, session: dict) -> UnpackResult:
+    result = self._parse_frame(data, session)
+    did = result["did"]
+    payload = result["raw_payload"]
+
+    # ===== 密钥协商：从注册帧提取随机码 =====
+    updates = {}
+    if did == 0x3001:
+        updates["random_code"] = payload[54:70].hex().upper()
+
+    # ===== 数据域多态：从注册帧/首帧提取表型 =====
+    if did == 0x0606:  # 数据上报
+        meter_type = self._extract_meter_type(payload)
+        updates["meter_type"] = meter_type
+
+        # 按表型条件解析（详见 data-domain-polymorphism.md）
+        decoded = self._parse_by_type(payload, meter_type)
+        return UnpackResult(
+            command_id=did, payload=payload,
+            session_updates=updates,
+            decoded_fields=decoded,
+            decoded_fields_mode="merge",
+        )
+
+    return UnpackResult(command_id=did, payload=payload, session_updates=updates)
+```
+
+**关键原则**：
+- `session_updates` 只写**需要跨帧持久化的数据**（密钥、表型、序列号）。
+  不要把单次解析的临时值放进去——它们会让 session 膨胀且不可预期
+- 如果同一个 `unpack()` 中同时更新密钥协商信息和表型信息，
+  两者通过 `session_updates` 的 dict 合并自然共存，接收顺序由帧到达顺序决定
+- 如果表型获取失败（注册帧未收到或解析失败），`meter_type` 在 session 中为空/默认值，
+  后续帧解包时应*降级处理*（仅解析通用字段，日志记录 warning）
+
 ---
 
-## C. 同构协议：拷贝后独立运行
+## B. 同构拷贝：完整 codec 示例
 
-### C.1 核心原则
+当新协议的帧结构/安全层与已有协议一致时（详见 SKILL.md §7 决策树判断），
+从已有协议**拷贝**底层文件后修改。**禁止跨协议 import**。
 
-**每套协议目录是独立交付单元**。当新协议与已有协议帧结构/安全层一致时，从已有协议**拷贝**底层文件后修改。**禁止跨协议 import**（from plugins.other_protocol import ...）。
-
-### C.2 正确做法
-
-步骤1: 拷贝底层文件
-  cp plugins/gh_protocol/frame_security.py plugins/jk_100_protocol/frame_security.py
-
-步骤2: 修改拷贝后的文件
-  - 类名/常量（HEAD/TAIL/DID范围）
-  - 功能码映射
-  - 默认安全策略
-
-步骤3: codec.py同目录相对导入
-  from .frame_security import FrameCodec    # 正确
-  # from plugins.gh_protocol.frame_security import ...  # 禁止
-
-步骤4: 验证独立性
-  删除/重命名其他协议目录，确认新协议仍可加载
-
-### C.3 完整示例
+以下是拷贝后 codec.py 的完整参考实现：
 
 ```python
 # plugins/jk_100_protocol/codec.py
@@ -116,57 +177,64 @@ class Codec(ProtocolCodec):
                            session_updates=updates)
 ```
 
-### C.4 拷贝后需修改
+**拷贝后必须修改**：类名、帧头/帧尾、DID映射表、功能码映射、随机码偏移、MAC长度、默认安全模式。
 
-类名、帧头/帧尾、DID映射表、功能码映射、随机码偏移、MAC长度、默认安全模式。
-
-### C.5 何时不应该拷贝
-
-CRC/加密/MAC完全不同、安全层完全不同、帧结构差异太大 -> 全新编写。
-
----
-
-## D. 异常路径处理
-
-### D.1 codec层
-
-pack失败抛ProtocolPackError。CRC失败抛ProtocolUnpackError。MAC失败抛ProtocolAuthError。
-
-### D.2 Channel层传播
-
-unpack异常 -> warning/error日志 -> error_callbacks -> 继续，永不中断接收循环。
-
-### D.3 非致命容错
-
-_allow_unverified_parse=True：MAC失败仍返回payload，标记mac_verified:false。
+**独立性验证**（将 codec.py 放在同目录运行）：
+```python
+import ast, sys
+with open("plugins/new_protocol/codec.py") as f:
+    tree = ast.parse(f.read())
+for node in ast.walk(tree):
+    if isinstance(node, ast.ImportFrom):
+        if "plugins" in node.module and "new_protocol" not in node.module:
+            print(f"违规跨协议import: {node.module}")
+```
 
 ---
 
-## E. 测试策略
+## C. 异常路径处理
 
-### E.1 单元测试
+### C.1 codec 层
 
-test_pack_minimal, test_unpack_valid, test_unpack_crc_error, test_unpack_mac_error。
+- pack 失败 → 抛 `ProtocolPackError`
+- CRC 失败 → 抛 `ProtocolUnpackError`
+- MAC 失败 → 抛 `ProtocolAuthError`
 
-### E.2 集成测试
+### C.2 Channel 层传播
 
-MockTransport + ProtocolChannel.create + send + simulate_receive。
+unpack 异常 → warning/error 日志 → error_callbacks → **继续**，永不中断接收循环。
 
-### E.3 独立性测试
+### C.3 非致命容错
 
-用ast解析codec.py的import，验证不引用其他plugins/*模块。
+`_allow_unverified_parse=True`：MAC 失败仍返回 payload，标记 `mac_verified: false`。
 
 ---
 
-## F. 故障排查
+## D. 测试策略
+
+### D.1 单元测试
+
+`test_pack_minimal`, `test_unpack_valid`, `test_unpack_crc_error`, `test_unpack_mac_error`。
+
+### D.2 集成测试
+
+`MockTransport + ProtocolChannel.create + send + simulate_receive`。
+
+### D.3 独立性测试
+
+用 ast 解析 codec.py 的 import，验证不引用其他 `plugins/*` 模块。
+
+---
+
+## E. 故障排查
 
 | 症状 | 原因 | 排查 |
 |------|------|------|
-| GUI无协议 | config.yaml缺失 | 检查plugins/目录 |
-| 命令为空 | commands.yaml路径错 | 显示名=目录名 |
-| 帧长度错 | field length不匹配 | 逐字段验证 |
-| 解析乱码 | 密钥未进session | 检查密钥路径 |
-| CRC失败 | 算法或范围错 | 对照文档 |
-| seq不递增 | session_updates缺失 | unpack返回 |
-| override无效 | 未标记codec_override | 检查指令属性 |
-| 跨协议import | 引用其他插件 | 拷贝+相对导入 |
+| GUI 无协议 | config.yaml 缺失 | 检查 plugins/ 目录 |
+| 命令为空 | commands.yaml 路径错 | 显示名 = 目录名 |
+| 帧长度错 | field length 不匹配 | 逐字段验证 |
+| 解析乱码 | 密钥未进 session | 检查密钥路径 |
+| CRC 失败 | 算法或范围错 | 对照文档 |
+| seq 不递增 | session_updates 缺失 | unpack 返回 |
+| override 无效 | 未标记 codec_override | 检查指令属性 |
+| 跨协议 import | 引用其他插件 | 拷贝 + 相对导入 |

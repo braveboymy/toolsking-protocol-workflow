@@ -1,5 +1,8 @@
 # 测试向量提取与契约测试生成
 
+> 📏 ~2,900 tokens | 必读等级: ★★☆（Phase 3 必须）| 前置: codec 实现完成
+> ⏩ 如果你只需要查 CRC 反推方法，跳到 §4
+
 配合 `protocol-integration-workflow` 和 `document-analysis-workflow.md` 使用。
 本文档解决核心问题：**在没有真实硬件的条件下，如何验证组帧（pack）和解包（unpack）的字节级正确性。**
 

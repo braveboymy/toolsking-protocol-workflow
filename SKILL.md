@@ -3,15 +3,47 @@ name: protocol-integration-workflow
 description: First-principles guide for integrating a new communication protocol into ToolsKing. Covers the layered architecture (Transport/Codec/Channel/Runtime/Facade), frame encoding/decoding pipelines, security layer patterns, data type boundaries, parameter persistence, and UI contract. Use when analyzing, designing, or implementing any protocol plugin.
 ---
 
-# ToolsKing 协议接入：第一性原理
+# ToolsKing 协议接入：架构契约与实现参考
 
-> **完整工作流**：本文件是协议接入的架构与实现参考。如果你刚拿到一份新的 PDF/Word/MD 协议文档，请**先按以下顺序阅读参考文档**：
+> **⏱️ 最小上下文路径**：回答以下 3 个问题，确定你需要的文档子集。
+>
+> ```
+> Q1: 数据域是固定字段顺序，还是 TLV 自描述？
+>   ├─ 固定 schema → 继续 Q2
+>   └─ TLV/自描述 → 跳读 commands-yaml-template.md §12（可跳过 §1-11）
+>
+> Q2: 协议是否有加密/认证层？
+>   ├─ 无安全层   → 本文档 §3.3 模式 A 即可
+>   ├─ 仅加密     → 本文档 §3.3 模式 B + §3.4
+>   └─ 加密+MAC   → 本文档 §3 全读 + data-domain-polymorphism.md（如有表型差异）
+>
+> Q3: 帧格式/安全层与已有协议同构？
+>   ├─ 同构 → 走本文档 §7 决策树 + technical-extension.md §B（同构拷贝）
+>   └─ 异构 → 走 technical-extension.md §A（分步实现指南）
+> ```
+>
+> **🏃 专家路径**：如果你已接入过至少一套协议，可以跳过 §1（分层架构）和 §4（类型系统），
+> 直接进入 §2（接口契约）→ 选择 §3（安全层，按 Q2 决定读多少）→ §7（同构决策，按 Q3）。
+>
+> ---
+>
+> **完整工作流**：本文件是协议接入的架构与实现参考。如果你刚拿到一份新的 PDF/Word/MD 协议文档，请**分阶段阅读**：
+>
+> **第一阶段：建立全局认知**
 > 1. `references/document-analysis-workflow.md` — Phase 0: 从文档中系统提取所有实现所需信息
-> 2. `references/field-type-mapping.md` — 把文档中的类型描述映射到框架的 FieldType
-> 3. `references/commands-yaml-template.md` — 生成 commands.yaml
-> 4. 回到本文档 — 理解架构分层，实现 codec
-> 5. `references/test-vector-extraction.md` — 用文档中的 hex dump 编写契约测试
-> 6. `references/technical-extension.md` — 处理同构拷贝、异常路径等特殊情况
+> 2. **本文档 §1-§2** — 理解分层架构与 codec 契约（`PackContext` / `UnpackResult` / `decoded_fields_mode` 是 commands.yaml 设计的基础）
+>
+> **第二阶段：配置与命令定义**
+> 3. `references/field-type-mapping.md` — 把文档中的类型描述映射到框架的 FieldType
+> 4. `references/commands-yaml-template.md` — 编写 commands.yaml
+> 5. **本文档 §5-§6** — 参数模型与 UI 契约（`overrides` / `session` / `params` 直接影响 commands.yaml 的参数段设计）
+> 6. `references/data-domain-polymorphism.md` — 如果协议存在表型差异（同一命令不同表型返回不同字段），在此阶段设计参数→会话→条件解析链路
+>
+> **第三阶段：实现与测试**
+> 6. **本文档 §3, §7** — 安全层模式 + 同构 vs 异构决策树
+> 7. `references/technical-extension.md` — 代码级参考（完整 codec 示例、异常处理、故障排查）
+> 8. `references/test-vector-extraction.md` — 用文档中的 hex dump 编写契约测试
+> 9. `references/conformance-test-matrix.md` — Phase 3.5: 系统化覆盖全部命令、异常路径、安全模式、状态机
 
 ## 目录
 
@@ -23,6 +55,25 @@ description: First-principles guide for integrating a new communication protocol
 6. [UI 契约：界面能做什么，能向下传递什么](#6-ui-契约界面能做什么能向下传递什么)
 7. [接入决策树：同构 vs 异构](#7-接入决策树同构-vs-异构)
 8. [实现检查清单](#8-实现检查清单)
+
+---
+
+> **Phase 3.5 补充**：完成 Phase 3 契约测试后，如需系统化验证全部命令空间、异常路径、安全模式组合和会话状态机，请参阅 `references/conformance-test-matrix.md`。
+>
+> **参考文档速查**：
+> | 文件 | 内容 | 阶段 |
+> |------|------|------|
+> | `references/document-analysis-workflow.md` | Phase 0：PDF/Word/MD 协议文档系统化分析流程 | 第一阶段 — 最先阅读 |
+> | 本文档 §1-§2 | 分层架构、PackContext/UnpackResult/decoded_fields_mode 契约 | 第一阶段 — 必须，影响 commands.yaml 设计 |
+> | `references/field-type-mapping.md` | 协议文档类型 → 22 种 FieldType 精确映射表 | 第二阶段 — 提取命令字段时对照 |
+> | `references/commands-yaml-template.md` | 从命令表到 commands.yaml 的完整转换模板。第 12 节 TLV/自描述格式，第 13 节表具计量数据强制解析规则 | 第二阶段 — 编写 commands.yaml 时对照 |
+> | 本文档 §5-§6 | 参数模型（params/session/overrides 合并规则）与 UI 契约 | 第二阶段 — 影响 commands.yaml 的参数段设计 |
+> | `references/data-domain-polymorphism.md` | **数据域多态**：表型决定字段集，决定性参数 → 会话状态 → 条件解析的完整模式 | 第二阶段 — 协议存在表型差异时必读 |
+> | 本文档 §3, §7 | 安全层三种模式 + 同构 vs 异构决策树 | 第三阶段 — codec 实现前必读 |
+> | `references/technical-extension.md` | 代码级参考：完整 codec 示例、异常处理、故障排查 | 第三阶段 — codec 实现时参考 |
+> | `references/test-vector-extraction.md` | 测试向量定位→提取→pytest 契约测试生成 | 第三阶段 — 实现 codec 后编写单条向量测试 |
+> | `references/conformance-test-matrix.md` | **Phase 3.5**：命令全覆盖 × 六类测试类型，含自动生成脚本、pytest 参数化框架、计量院检测映射 | 第三阶段 — 送检前 / 发布前完整执行 |
+> | `references/anti-patterns.md` | **反模式清单**：7 种最常见错误（硬编码偏移量、session_updates 滥用、raw_hex 模糊化计量数据等）及修正方法 | 全阶段 — 实现过程中随时对照 |
 
 ---
 
@@ -130,7 +181,40 @@ ProtocolChannel.send(command_name, field_data)
 
 **返回值**：完整帧字节。失败必定抛 `ProtocolPackError`，不返回 None 或 b""。
 
-### 2.2 接收管线（上行）
+### 2.2 接收循环的驱动机制
+
+在讨论接收管线之前，必须先理解**谁驱动了接收**——这直接影响 codec 的实现约束。
+
+```
+              ┌──────────────────────────┐
+              │ Transport 层              │
+              │                           │
+              │ SerialTransport:          │
+              │  独立读线程 → data_cb()   │  ← 线程回调（异步）
+              │                           │
+              │ TcpTransport:             │
+              │  独立读线程 → data_cb()   │  ← 线程回调（异步）
+              │                           │
+              │ MockTransport:            │
+              │  测试代码直接调用          │  ← 同步调用
+              └──────────┬───────────────┘
+                         │ data_cb(data: bytes)
+                         ▼
+              ProtocolChannel._on_raw_data(data)
+```
+
+**关键约束**：
+- 串口/TCP 的 `data_cb` 在**独立 I/O 线程**中调用，不是主线程
+- 这意味着 `codec.unpack()` 在 I/O 线程中执行
+- **codec 实现者必须注意**：如果 `unpack()` 中有耗时操作（如 AES 解密大 payload），会阻塞后续帧的接收
+- 推荐：codec 内部只做轻量级字节操作（切片、查表、位运算）。如需耗时密码运算，将 `unpack()` 设计为剥离安全层后的 payload 不做深入解析，把结构化解析延迟给 BinaryFormatter
+
+**主动上报帧的特殊性**：
+- 主动上报帧**不由 host 的 send() 触发**，而是由设备主动推送
+- 接收管线对主动上报帧和响应帧的处理路径完全相同——都走 `_on_raw_data → codec.unpack → CommandStore 匹配`
+- 唯一的区别：主动上报帧在 commands.yaml 中可能只定义了 `response` 侧（没有 `request`），但不影响 Channel 的匹配逻辑
+
+### 2.3 接收管线（上行）
 
 ```
 transport 回调 data(bytes)
@@ -144,6 +228,9 @@ ProtocolChannel._on_raw_data(data)
   └─ 对每一帧:
        ├─ 2. codec.unpack(frame, session_snapshot) → UnpackResult
        ├─ 3. session.apply_updates(result.session_updates)
+       │
+       │  ═══ 以下步骤由框架自动完成，codec 无需关心 ═══
+       │
        ├─ 4. CommandStore 查 command_id → command_name + direction
        ├─ 5. 按 decoded_fields_mode 构建最终字段:
        │     schema: 用 BinaryFormatter 反向解析 payload
@@ -153,13 +240,15 @@ ProtocolChannel._on_raw_data(data)
        └─ 7. 通知 _parsed_callbacks（GUI 通过此路径拿到解析结果）
 ```
 
+**对 codec 实现者而言，只需关注步骤 1-3。**
+
 **UnpackResult 的 6 个字段是 codec 能输出的全部**：
 
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `command_id` | `int` | 从帧中提取的命令 ID（整数） |
 | `payload` | `bytes` | 解密/解包后的业务字节 |
-| `session_updates` | `dict` | 需要写回 session.state 的键值 |
+| `session_updates` | `dict` | 需要写回 session.state 的键值。**关键用途**：存储表型等决定性参数，供后续多态解析使用（详见 `references/data-domain-polymorphism.md`） |
 | `decoded_fields` | `dict\|None` | codec 自行解析的结构化结果 |
 | `decoded_fields_mode` | `str` | "schema" / "replace" / "merge" |
 | `meta` | `dict` | 仅调试/日志用，不参与业务 |
@@ -169,14 +258,14 @@ ProtocolChannel._on_raw_data(data)
 | 模式 | 行为 | 适用场景 |
 |------|------|---------|
 | `schema` | 忽略 decoded_fields，仅用 commands.yaml schema 反向解析 | 标准命令，字段结构与定义一致 |
-| `replace` | 用 decoded_fields 完全替代 schema 解析 | 协议层自行完成所有解析（如 100 协议记录数据） |
+| `replace` | 用 decoded_fields 完全替代 schema 解析 | codec 自行完成所有解析（加密嵌套、复杂TLV、记录数据等） |
 | `merge` | schema 解析打底，decoded_fields 覆盖同名键 | 部分字段需要 codec 特殊处理 |
 
 > **如何选择模式**：如果你的协议使用 TLV / Tag-Length-Value 自描述格式，
 > 请参考 `references/commands-yaml-template.md` **第 12 节**，其中包含完整的决策树（§12.2）、
 > 各模式下的字段定义粒度指南（§12.3–12.4）、以及 codec ↔ commands.yaml 的 key 名契约（§12.5）。
 
-### 2.3 split_frames：多帧拆分
+### 2.4 split_frames：多帧拆分
 
 默认 `split_frames(data) → [data]`，即假设一次回调=一帧。
 
@@ -232,36 +321,32 @@ def pack(self, ctx: PackContext) -> bytes:
 - **运行时协商**：注册帧返回的随机码 → unpack 中计算派生密钥 → 通过 `session_updates` 写入 state
 - **config.yaml 默认值**：`session` 段的默认值在 `ProtocolFacade.switch_protocol()` 时注入 params
 
-### 3.3 三种安全层级模式
+### 3.3 三种安全层级
 
-本工程中的协议呈现三种复杂度：
+协议的安全复杂度大致分为三档（以下用抽象模式描述，不绑定特定协议）：
 
-**模式 A：无安全层（HIL 协议）**
+**模式 A：无安全层**
 ```
-payload → CRC16 → 嵌入帧 → 返回
+payload → CRC → 嵌入帧 → 返回
 ```
-最简单的管道。pack 时计算 CRC 追加到帧尾，unpack 时校验 CRC。无加密无 MAC。
+只需计算和校验 CRC。无加密、无 MAC。适用场景：调试协议、内网封闭协议。
 
-**模式 B：单层安全（新金卡协议 jk_protocol）**
+**模式 B：单层加密**
 ```
-payload → DES-ECB 加密前8字节 → CRC16 校验 → 嵌入帧 → CS 校验 → 帧头帧尾
+payload → 对称加密 → CRC → 嵌入帧 → 帧头帧尾
 ```
-加密和校验在一个 `SecurityLayer(Subconstruct)` 中处理，用 construct 库声明式定义。
+在 CRC 之前对 payload（或 payload 的一部分）做加密。密钥通常是预设的固定值。
+适用场景：有保密需求但不需要防篡改的协议。
 
-**模式 C：双层安全（100 协议 / gh_protocol）**
+**模式 C：加密 + 消息认证（MAC）**
 ```
-payload → AES-ECB+PKCS7 加密 → HMAC-SHA256 MAC → 嵌入帧 → CRC16 → 帧头帧尾
+payload → 加密 → 追加 MAC → 嵌入帧 → CRC → 帧头帧尾
 ```
-最复杂管道。安全模式通过 `_function_rule_mode` 按功能码+方向自动决策：
-- 04H 下行：无数据域 → mode="none"
-- 05H 下行：密文+MAC → mode="cipher_mac"
-- 09H 上下行：明文+MAC → mode="plain_mac"
+最完整的管道。安全策略通常需要**按命令/方向自动决策**（例如某些命令无数据域则跳过加密、
+某些命令只需 MAC 不需要加密）。密钥可能来自固定预设值，也可能来自**注册帧密钥协商**
+（设备返回随机码，主机用主密钥派生会话密钥）。
 
-密钥派生涉及主密钥 + 终端随机码：
-```
-enc_key = HMAC-SHA256(主密钥, 随机码)[:16]
-mac_key = AES-128-ECB(主密钥, 随机码)[:16]
-```
+你的协议属于哪一档，决定了 codec 的复杂度上限。从模式 A 开始实现，逐步叠加。
 
 ### 3.4 安全决策的可覆盖性
 
@@ -281,7 +366,7 @@ def pack(self, ctx: PackContext) -> bytes:
 
 ### 4.1 类型注册表
 
-`TypeRegistry` 是全局单例，存储 `type_name → FieldType 子类` 映射。所有类型在 `app/infrastructure/validators/core/registry.py` 中管理，在 `app/infrastructure/validators/types/builtin.py` 底部完成注册。
+所有 FieldType 通过 `TypeRegistry.register()` 全局注册。新增的类型（见 §4.4）在 codec 的 `on_load()` 中导入即可自动完成注册。
 
 ### 4.2 已注册类型完整清单
 
@@ -295,16 +380,16 @@ def pack(self, ctx: PackContext) -> bytes:
 | `int16` | `Int16Field` | 2 | 有符号 16 位整数 |
 | `int32` | `Int32Field` | 4 | 有符号 32 位整数 |
 | `string` | `StringField` | 配置决定 | UTF-8 字符串，不足补 `0x00` |
-| `bcd` | `BCDField` | 配置决定 | BCD 编码 |
+| `bcd` | `BCDField` | 配置决定 | 有符号 BCD（支持 `+/-`、小数点和符号字节） |
 | `bcd_u` | `BCDUField` | 配置决定 | 无符号 BCD 编码 |
 | `bcd_u_array` | `BCDUArrayField` | 配置决定 | BCD 数组 |
-| `yymmddhhmmss` | `YYMMDDHHMMSSField` | 6 | 年月日时分秒 BCD |
-| `yymmddhhmm` | `YYMMDDHHMMField` | 5 | 年月日时分 BCD |
-| `yymmddhh` | `YYMMDDHHField` | 4 | 年月日时 BCD |
-| `yymmdd` | `YYMMDDField` | 3 | 年月日 BCD |
-| `hhmmss` | `HHMMSSField` | 3 | 时分秒 BCD |
-| `hhmm` | `HHMMField` | 2 | 时分 BCD |
-| `yymm` | `YYMMField` | 2 | 年月 BCD |
+| `yymmddhhmmss` | `YYMMDDHHMMSSField` | 6 | 年月日时分秒（默认 BCD，可设 `encoding: hex`） |
+| `yymmddhhmm` | `YYMMDDHHMMField` | 5 | 年月日时分（默认 BCD，可设 `encoding: hex`） |
+| `yymmddhh` | `YYMMDDHHField` | 4 | 年月日时（默认 BCD，可设 `encoding: hex`） |
+| `yymmdd` | `YYMMDDField` | 3 | 年月日（默认 BCD，可设 `encoding: hex`） |
+| `hhmmss` | `HHMMSSField` | 3 | 时分秒（默认 BCD，可设 `encoding: hex`） |
+| `hhmm` | `HHMMField` | 2 | 时分（默认 BCD，可设 `encoding: hex`） |
+| `yymm` | `YYMMField` | 2 | 年月（默认 BCD，可设 `encoding: hex`） |
 | `record` | `RecordField` | 配置决定 | 嵌套记录结构 |
 | `record_array` | `RecordArrayField` | 配置决定 | 记录数组 |
 | `bitfield` | `BitField` | 配置决定 | 位域，需配置 `bits` 列表 |
@@ -312,42 +397,21 @@ def pack(self, ctx: PackContext) -> bytes:
 
 ### 4.3 类型选择决策树
 
-从协议文档中的类型描述到 FieldType 注册名的映射规则：
+从协议文档中的类型描述到 FieldType 注册名的映射规则。
 
-```
-协议文档描述
-  │
-  ├─ 提到 "十六进制" / "hex" / "原始数据"
-  │   ├─ 固定长度 → hex (length=N)
-  │   └─ 变长（由其他字段指定长度）→ raw_hex + dynamic: true
-  │
-  ├─ 提到 "无符号整数" / "unsigned" / "U8/U16/U32"
-  │   ├─ 1 字节 → uint8
-  │   ├─ 2 字节 → uint16
-  │   └─ 4 字节 → uint32
-  │
-  ├─ 提到 "有符号整数" / "signed" / "S16/S32"
-  │   ├─ 2 字节 → int16
-  │   └─ 4 字节 → int32
-  │
-  ├─ 提到 "字符串" / "ASCII" / "UTF-8" / "字符数组"
-  │   └─ string (length=文档声明的字节数)
-  │
-  ├─ 提到 "BCD" / "8421码" / "压缩BCD"
-  │   ├─ 单个 BCD 值 → bcd_u
-  │   ├─ BCD 数组 → bcd_u_array
-  │   └─ 日期时间 BCD → 按格式选择 yymmddhhmmss / yymmddhhmm / yymmdd / hhmmss 等
-  │
-  ├─ 提到 "位" / "bit" / "bit0~bit7" / "D0~D7"
-  │   └─ bitfield (需逐位列出 bits 配置)
-  │
-  ├─ 提到 "枚举" / "取值: 0=xxx, 1=yyy" / "状态码"
-  │   └─ enum (需列出 enum_values)
-  │
-  └─ 提到 "结构体" / "嵌套" / "TLV"
-      ├─ 单个结构体 → record
-      └─ 结构体数组 → record_array
-```
+**完整决策矩阵（表格版）** 见 `references/field-type-mapping.md` 第 9 节"快速决策矩阵"。
+以下为快速速查：
+
+- 十六进制固定长度 → `hex`，变长 → `raw_hex` + `dynamic: true`
+- 无符号整数 (1/2/4 字节) → `uint8` / `uint16` / `uint32`
+- 有符号整数 (2/4 字节) → `int16` / `int32`
+- 无符号 BCD（纯数字）→ `bcd_u`；有符号 BCD（含 +/- 和小数点）→ `bcd`
+- BCD 数组 → `bcd_u_array`
+- 日期时间 → 按格式选 `yymmddhhmmss` ~ `yymm`，默认 BCD 编码，可设 `encoding: hex`
+- 字符串 → `string`
+- 每个 bit 有独立含义 → `bitfield`（需列出 `bits` 配置）
+- 有限个预定义取值 → `enum`（需列出 `enum_values`）
+- 嵌套结构体 → `record`；结构体数组 → `record_array`
 
 **字节序注意事项**：
 - 协议文档中 "高字节在前" / "大端" / "MSB first" → `byte_order: big`（默认值）
@@ -437,26 +501,7 @@ session:
   main_key_non_default: ""  # 主密钥（非标）
 ```
 
-`session` 段的 key 在 `ProtocolFacade.switch_protocol()` 时作为 state 初始值注入。运行时 codec 通过 `session_updates` 写回新值。
-
-### 5.4 参数合并的完整流程
-
-```
-软件启动
-  │
-  ├─ 1. 加载 config.yaml → 解析 parameters 段 → 注入 params
-  ├─ 2. 加载 settings.json → 覆盖 params 中有 persisted 标记的值
-  ├─ 3. 解析 session 段 → 注入 state 初始值
-  │
-协议切换 (switch_protocol)
-  │
-  ├─ 4. 重新执行步骤 1-3
-  │
-每次 send()
-  │
-  ├─ 5. ProtocolSession.snapshot() → {**params, **state} → 作为 ctx.session
-  └─ 6. codec.pack(ctx) 从 ctx.session 取密钥/序列号/地址
-```
+`session` 段的 key 在协议切换时作为 state 初始值注入。运行时 codec 通过 `session_updates` 写回新值。
 
 ---
 
@@ -488,19 +533,6 @@ instruction_attributes:
 ```
 
 `codec_override: true` 的属性在 `ProtocolChannel.send()` 中从 `field_data` 剥离，放入 `PackContext.overrides`，不参与 BinaryFormatter 序列化。
-
-### 6.3 GUI 展示的元数据来源
-
-| GUI 展示内容 | 数据来源 |
-|-------------|---------|
-| 协议列表 | `ProtocolRegistry` 扫描 `plugins/` 目录 |
-| 协议名 | `config.yaml` 的 `protocol.name` |
-| 命令列表 | `commands.yaml` 的 `commands` 键 |
-| 命令名（中文） | 命令的 `name` 字段或键名 |
-| 字段名（中文） | `fields[].name` |
-| 字段类型信息（提示） | `fields[].type` + `fields[].length` + `fields[].description` |
-| 参数字段 | `config.yaml` 的 `parameters` 段 |
-| 实时数据 | `ParsedFrame` 通过 Qt Signal 推送 |
 
 ---
 
@@ -569,61 +601,83 @@ instruction_attributes:
 
 ## 8. 实现检查清单
 
-### 8.1 Phase 0：文档分析（本 phase 检查点）
+### 8.1 Phase 0：文档分析
 
-- [ ] 协议文档已转为可搜索的文本格式
-- [ ] 帧格式已精确文档化（每个字节的偏移/长度/含义/常量值）
-- [ ] 所有命令的 command_id 已提取
-- [ ] 每个命令的 request/response 字段已提取（名称/类型/长度/字节序）
-- [ ] CRC/校验算法参数已提取（多项式/初始值/校验范围/字节序）
-- [ ] 安全层参数已提取（加密算法/密钥来源/MAC 算法）
-- [ ] 错误码表已提取
-- [ ] 测试向量已提取（至少 3 条：1 条简单请求，1 条含 payload 请求，1 条响应）
-- [ ] 类型映射已完成（协议文档类型 → FieldType 注册名）
+> ⛔ **门控条件**：进入本 Phase 的前提——已拿到可搜索的协议文档文本
+
+从协议文档（PDF/Word/MD）中系统提取实现所需全部信息。
+
+> **详细检查清单** → `references/document-analysis-workflow.md` 第 9 节
+>
+> **核心产出**：帧格式表、命令表、CRC/安全参数、错误码表、测试向量（≥3条）
+>
+> **常见错误** → `references/anti-patterns.md` 无直接对应（Phase 0 错误通常在 Phase 1-2 暴露）
 
 ### 8.2 Phase 1：配置与命令定义
 
-- [ ] `plugins/<key>/config.yaml` 已创建
-  - [ ] `protocol.name` / `protocol.version` 已填写
-  - [ ] `parameters` 段已定义（密钥、地址等持久化参数）
-  - [ ] `session` 段已定义（运行时状态初始值）
-  - [ ] `frame` 段已定义（帧头/帧尾等常量，如有）
-  - [ ] `security` 段已定义（安全配置，如有）
-- [ ] `config/protocols/<Display Name>/commands.yaml` 已创建
-  - [ ] 所有命令的 request/response 已定义
-  - [ ] 所有字段的 type/length/byte_order/default 已填写
-  - [ ] 枚举字段的 enum_values 已列出
-  - [ ] 位域字段的 bits 已逐位定义
-  - [ ] 动态字段（raw_hex + dynamic: true）已标记
-  - [ ] instruction_attributes 已按需配置（codec_override 标记）
-  - [ ] **表具行业协议专项**：所有计量数据（累积量/金额/流量/压力/温度/单价/阀门状态）
-    已逐字段独立定义，含 type/length/unit/scale，未被压缩为 raw_hex
-    （详见 `references/commands-yaml-template.md` 第 13 节）
+> ⛔ **门控条件**：进入本 Phase 前，确认 Phase 0 以下产出已就绪：
+> - [ ] 帧格式已精确文档化（每个字节的偏移/长度/含义）
+> - [ ] 所有命令的 command_id 已提取并转为 hex 格式
+> - [ ] CRC/校验算法参数已确定（多项式/初始值/范围）
+> - [ ] 安全层参数已确认（加密算法/密钥来源）
+> - [ ] 至少 3 条测试向量的 hex dump 已提取
+>
+> 如果以上任一项未完成，**回到 Phase 0**。
+
+创建 `config.yaml` 和 `commands.yaml`，将 Phase 0 产出转化为框架可用的结构化定义。
+
+> **通用检查清单** → `references/commands-yaml-template.md` 第 11 节
+>
+> **TLV/自描述格式专项** → `references/commands-yaml-template.md` 第 12.7 节
+>
+> **表具行业计量数据专项** → `references/commands-yaml-template.md` 第 13.7 节
+>
+> **类型映射参考** → `references/field-type-mapping.md` 第 9 节决策矩阵
+>
+> **核心产出**：可加载的 `commands.yaml`、通过字段验证的 `config.yaml`
+>
+> **常见错误** → `references/anti-patterns.md` §5（raw_hex 模糊化计量数据）、§7（忽略主动上报帧时机）
 
 ### 8.3 Phase 2：Codec 实现
 
-- [ ] `plugins/<key>/codec.py` 已创建
-  - [ ] `Codec` 类继承 `ProtocolCodec`
-  - [ ] `on_load(config)` 已实现（读取 config.yaml 参数）
-  - [ ] `pack(ctx)` 已实现（payload → 完整帧）
-  - [ ] `unpack(data, session)` 已实现（完整帧 → UnpackResult）
-  - [ ] 需要时覆盖 `split_frames(data)`（字节流粘包处理）
-  - [ ] `explain_decision()` 已实现（安全模式决策的可视化说明）
-- [ ] 安全层完全在 codec 内部处理（框架不感知加解密）
-- [ ] 异常处理：pack 失败抛 `ProtocolPackError`，unpack 失败抛 `ProtocolUnpackError`
-- [ ] 无跨协议 import（独立性验证通过 ast 检查）
+> ⛔ **门控条件**：进入本 Phase 前，确认 Phase 1 以下产出已就绪：
+> - [ ] `config/protocols/<协议名>/commands.yaml` 已创建且可正常加载
+> - [ ] `plugins/<key>/config.yaml` 已创建且参数段完整
+> - [ ] 已确定走同构拷贝还是全新开发（§7.1 决策树）
+>
+> 如果以上任一项未完成，**回到 Phase 1**。
 
-### 8.4 Phase 3：测试
+实现 `plugins/<key>/codec.py`，继承 `ProtocolCodec`，完成帧编解码和异常处理。
 
-- [ ] 契约测试：从协议文档提取的测试向量已转为 pytest
-  - [ ] 每条向量测试：`codec.pack()` 输出与 hex dump 逐字节一致
-  - [ ] 每条向量测试：`codec.unpack()` 解析结果与文档字段一致
-- [ ] 单元测试：`test_pack_minimal` / `test_unpack_valid`
-- [ ] 异常路径测试：CRC 错误 / MAC 错误 / 帧头错误
-- [ ] 集成测试：`MockTransport + ProtocolChannel` 收发闭环
-- [ ] 往返测试：`pack → unpack` 后 payload 不变
+> **代码级参考** → `references/technical-extension.md`（完整 codec 示例、异常处理、故障排查）
+>
+> **架构契约** → 本文档 §2（PackContext/UnpackResult） + §3（安全层） + §7（同构拷贝决策）
+>
+> **核心产出**：`pack()`/`unpack()` 通过契约测试，安全层正确处理，独立性验证通过
+>
+> **常见错误** → `references/anti-patterns.md` §1（硬编码偏移量）、§3（session_updates 滥用）、§4（全局状态）、§6（重复应用 scale）
 
-### 8.5 Phase 4：验证与交付
+### 8.4 Phase 3：契约测试
+
+> ⛔ **门控条件**：进入本 Phase 前，确认 codec 的 `pack()` 和 `unpack()` 方法已实现且无语法错误
+
+用 Phase 0 提取的 hex dump 测试向量验证 codec 字节级正确性。
+
+> **完整指南** → `references/test-vector-extraction.md`
+>
+> **核心产出**：pack 输出与 hex dump 逐字节一致、unpack 解析结果与文档一致、往返测试通过
+
+### 8.5 Phase 3.5：一致性测试（送检前必做）
+
+> ⛔ **门控条件**：进入本 Phase 前，确认 Phase 3 契约测试全部通过
+
+系统化覆盖全部命令空间 × 六类测试类型，验证协议实现的整体正确性。
+
+> **完整指南与检查清单** → `references/conformance-test-matrix.md`（含自动生成脚本、pytest 框架、计量院检测映射）
+>
+> **核心产出**：一致性测试矩阵、覆盖率报告、T1-T6 全量通过
+
+### 8.6 Phase 4：验证与交付
 
 - [ ] 在 GUI 中协议列表可看到新协议
 - [ ] 命令列表正确加载

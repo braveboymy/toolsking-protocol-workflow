@@ -1,5 +1,8 @@
 # 协议文档类型描述 → FieldType 映射指南
 
+> 📏 ~2,000 tokens | 必读等级: ★★☆（Phase 1 对照用，非通读）| 前置: SKILL.md §4
+> ⏩ 如果你只需要快速查类型，跳到 §9 快速决策矩阵
+
 配合 `protocol-integration-workflow` 和 `document-analysis-workflow.md` 使用。
 本文档覆盖所有 22 种已注册 FieldType 的协议文档描述识别、映射规则和配置要点。
 
@@ -17,7 +20,8 @@
 | "N 字节十六进制"/ "hex[16]" / "固定长度原始数据" | `hex` | N | - |
 | "变长数据"/ "data[length]" / "动态数据区" | `raw_hex` | 0 | dynamic: true |
 | "N 字节字符串"/ "char[N]" / "UTF-8" / "ASCII" | `string` | N | - |
-| "BCD 码 "/ "8421 码" / "压缩 BCD" | `bcd_u` | N | - |
+| "无符号 BCD 码"/ "8421 码" / "压缩 BCD" | `bcd_u` | N | - |
+| "有符号 BCD 码"/ "带符号字节的 BCD" / "±金额 BCD" | `bcd` | N | signed_layout |
 | "BCD 数组" / "多个 BCD 值连续" | `bcd_u_array` | N | - |
 | "年/月/日/时/分/秒 BCD" / "YYMMDDhhmmss" | `yymmddhhmmss` | 6 | - |
 | "年/月/日/时/分 BCD" | `yymmddhhmm` | 5 | - |
@@ -196,7 +200,74 @@
 **适用场景**：
 - 多个 BCD 值连续排列（如 12 个月的用气量，每月 4 字节 BCD）
 
-### 5.3 日期时间 BCD（7 种格式）
+### 5.3 bcd — 有符号 BCD（含符号字节）
+
+**适用场景**：
+- "8 字节有符号 BCD 金额，首位是符号字节"
+- "带正负号和小数点的 BCD 数值（如余额、温度、压力）"
+- 协议文档提到 "符号+数值" 或 "sign byte + BCD digits"
+
+**默认行为**：
+- `length == 8` 时，自动启用 `signed_layout`，默认 `integer_bytes=4, decimal_bytes=3`
+  （即 1 字节符号 + 4 字节整数 + 3 字节小数）
+- 其他长度默认行为与 `bcd_u` 一致（无符号），除非显式设置 `signed_layout: true`
+
+**符号字节约定**：
+- `0x00`：正数或零
+- `0x01`：负数
+
+**config 示例（显式声明）**：
+```yaml
+- name: 剩余金额
+  type: bcd
+  length: 8
+  signed_layout: true
+  integer_bytes: 4
+  decimal_bytes: 3
+  unit: 元
+  description: "有符号 BCD 金额，8字节=1字节符号+4字节整数+3字节小数"
+```
+
+**编码示例**（`integer_bytes=4`, `decimal_bytes=3`）：
+- `123.456` → `00 00 00 01 23 45 60 00`
+- `-567.89` → `01 00 00 05 67 89 00 00`
+- `0` → `00 00 00 00 00 00 00 00`
+
+**字段属性清单**：
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `signed_layout` | bool | 是否启用有符号布局，默认 `length==8` 时自动为 `true` |
+| `integer_bytes` | int | 整数部分字节数，默认 `4` (length=8) / `length-1` (其他) |
+| `decimal_bytes` | int | 小数部分字节数，默认 `3` (length=8) / `length-1-integer_bytes` (其他) |
+| `byte_bias` | int | 字节偏移（与 `bcd_u` 相同），默认 0 |
+
+### 5.4 日期时间类型（BCD/HEX 双编码模式）
+
+所有日期时间类型（`yymmddhhmmss` ~ `yymm`）均继承自 `DateTimeField`，**默认使用 BCD 编码**，同时支持 `encoding: hex` 切换为 HEX 编码。
+
+#### 编码模式对比
+
+| 编码 | 行为 | 适用场景 | 示例 |
+|------|------|---------|------|
+| `bcd`（默认） | 每字节高/低 nibble 各存一个十进制数字 | 电力/燃气行业（DL/T 645 风格） | `0x26 0x06 0x10` → "260610" |
+| `hex` | 每字节解释为 uint8 十进制值（0~255） | 部分自定义协议（非标准 BCD） | `0x1A 0x06 0x0A` → "260610" |
+
+**选择规则**：
+- 协议文档未提及编码方式 → 默认 `bcd`（不写 `encoding` 字段）
+- 协议文档明确 "每字节存十进制值"/"非 BCD"/"uint8 编码的时间" → `encoding: hex`
+- 不确定时：检查协议的示例 hex dump。如果 `2026-06-10` 的字节是 `20 06 10`，说明是 HEX 编码；如果是 `26 06 10`，则是 BCD 编码。
+
+**config 示例（HEX 编码的日期）**：
+```yaml
+- name: 当前时间
+  type: yymmddhhmmss
+  length: 6
+  encoding: hex
+  description: 每字节存十进制值（非 BCD），如 2026-06-10 22:15:30 编码为 26 06 10 22 15 30
+```
+
+#### 日期时间格式一览（7 种）
 
 | 格式 | 长度 | 示例值 | 说明 |
 |------|------|--------|------|
@@ -228,15 +299,15 @@
   length: 4
   byte_order: big
   bits:
-    - {name: "gpio_write",  bit: 0,  description: "GPIO 写能力"}
-    - {name: "gpio_read",   bit: 1,  description: "GPIO 读能力"}
-    - {name: "adc_once",    bit: 2,  description: "ADC 单次采样能力"}
-    - {name: "adc_window",  bit: 3,  description: "ADC 窗口采样能力"}
-    - {name: "eeprom_read", bit: 4,  description: "EEPROM 读能力"}
+    - {name: "gpio_write",  start_bit: 0,  description: "GPIO 写能力"}
+    - {name: "gpio_read",   start_bit: 1,  description: "GPIO 读能力"}
+    - {name: "adc_once",    start_bit: 2,  description: "ADC 单次采样能力"}
+    - {name: "adc_window",  start_bit: 3,  description: "ADC 窗口采样能力"}
+    - {name: "eeprom_read", start_bit: 4,  description: "EEPROM 读能力"}
     # ... bit 5~31
 ```
 
-**位序号约定**：`bit: 0` = 最低位（LSB），`bit: 7` = 最高位（MSB）。
+**位序号约定**：`start_bit: 0` = 最低位（LSB），`start_bit: 7` = 最高位（MSB）。
 协议文档中常见的 "bit0" 通常指 LSB；"D0" 也是 LSB。
 
 ### 6.2 enum — 枚举
@@ -341,7 +412,8 @@
 | 数据段的长度由另一个字段指定 | `raw_hex` + `dynamic: true` | 确认哪个字段是长度 |
 | 以 0x00 结尾或补零的文本 | `string` | 字符编码 |
 | 十进制数字用十六进制表示（如 99=0x99） | `bcd_u` | 确认是 BCD 不是 hex |
-| 年/月/日/时/分/秒 编码 | 选对应日期类型 | 确认格式 |
+| BCD 值带正负号和小数点（如金额） | `bcd` | 确认符号字节位置和整数/小数位数 |
+| 年/月/日/时/分/秒 编码 | 选对应日期类型 | 确认格式；区分 BCD/HEX 编码 |
 | 单字节表示 8 个独立状态 | `bitfield` | 列出每个 bit |
 | 有限个预定义取值 | `enum` | 列出所有取值 |
 | 字段内还有子字段结构，且结构固定 | `record` | 子结构定义 |

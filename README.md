@@ -17,28 +17,40 @@
 
 | 文件 | 内容 |
 |------|------|
-| `SKILL.md` | 完整八维度分析：架构分层、帧编解码、安全层、数据类型、参数模型、UI 契约、决策树、实现检查清单 |
+| `SKILL.md` | 完整协议接入方法论：分层架构、帧编解码、安全层、数据类型、参数模型、UI 契约、决策树、实现检查清单（含分阶段参考文档速查表） |
 
 ### 参考文档
 
-| 文件 | 内容 | 使用阶段 |
-|------|------|---------|
-| `references/document-analysis-workflow.md` | **Phase 0**: PDF/Word/MD 协议文档系统化分析流程，帧格式/命令表/CRC/安全参数/测试向量的提取方法论 | 拿到新协议文档后**最先阅读** |
-| `references/field-type-mapping.md` | 协议文档类型描述 → 22 种 FieldType 的精确映射表，含字节序决策和配置要点 | 提取命令字段时对照使用 |
-| `references/commands-yaml-template.md` | 从协议文档命令表到可用的 `commands.yaml` 的完整转换模板。**第 12 节专讲 TLV/自描述格式处理**，**第 13 节专讲表具行业（燃气表/水表）计量数据强制解析规则** | 编写 commands.yaml 时对照使用 |
-| `references/test-vector-extraction.md` | 测试向量定位→提取→pytest 契约测试生成，含 CRC 参数反推、往返测试、错误帧测试 | 实现 codec 后立即使用，**解决无法测试的问题** |
-| `references/technical-extension.md` | 代码级细节：完整数据流、三种安全模式代码、同构拷贝、异常处理、测试策略、故障排查 | codec 实现时参考 |
+| 文件 | 内容 | 阶段 |
+|------|------|------|
+| `references/document-analysis-workflow.md` | **Phase 0**：PDF/Word/MD 协议文档系统化分析流程 | 第一阶段 — 最先阅读 |
+| `references/field-type-mapping.md` | 协议文档类型描述 → 22 种 FieldType 精确映射表 | 第二阶段 — 提取字段时对照 |
+| `references/commands-yaml-template.md` | 从命令表到 `commands.yaml` 的完整转换模板。**第 12 节专讲 TLV 格式**，**第 13 节专讲表具计量数据** | 第二阶段 — 编写 commands.yaml |
+| `references/data-domain-polymorphism.md` | **数据域多态**：表型决定字段集——决定性参数 → 会话状态 → 条件解析的完整模式 | 第二阶段 — 协议有表型差异时必读 |
+| `references/test-vector-extraction.md` | 测试向量定位→提取→pytest 契约测试生成 | 第三阶段 — codec 完成后 |
+| `references/conformance-test-matrix.md` | **Phase 3.5**：命令全覆盖 × 六类测试类型，含自动生成脚本、pytest 参数化框架、计量院检测映射 | 第三阶段 — 送检/发布前 |
+| `references/technical-extension.md` | 代码级参考：Codec 分步实现指南、同构拷贝示例、异常处理、故障排查 | 第三阶段 — codec 实现时 |
+| `references/anti-patterns.md` | **反模式清单**：7 种最常见错误及修正方法 | 全阶段 — 实现过程中随时对照 |
 
 ### 推荐使用顺序
 
-```
-1. document-analysis-workflow.md  ← 先分析文档
-2. field-type-mapping.md          ← 映射字段类型
-3. commands-yaml-template.md      ← 编写命令定义
-4. SKILL.md                       ← 理解架构、实现 codec
-5. test-vector-extraction.md      ← 编写契约测试
-6. technical-extension.md         ← 处理特殊情况
-```
+> 详见 `SKILL.md` 头部的完整分阶段工作流。简要版本：
+>
+> **第一阶段：全局认知**
+> 1. `references/document-analysis-workflow.md`
+> 2. `SKILL.md` §1-§2（架构与 codec 契约）
+>
+> **第二阶段：配置与命令**
+> 3. `references/field-type-mapping.md`
+> 4. `references/commands-yaml-template.md`
+> 5. `SKILL.md` §5-§6（参数模型与 UI 契约）
+> 6. `references/data-domain-polymorphism.md`（协议有表型差异时）
+>
+> **第三阶段：实现与测试**
+> 6. `SKILL.md` §3, §7（安全层与决策树）
+> 7. `references/technical-extension.md`（代码级参考）
+> 8. `references/test-vector-extraction.md`（契约测试）
+> 9. `references/conformance-test-matrix.md`（一致性测试）
 
 ## 安装
 

@@ -1,5 +1,8 @@
 # 协议文档分析标准流程（Phase 0）
 
+> 📏 上下文预算: ~2,600 tokens | 必读等级: ★★★（Phase 0 必须）| 前置: 无
+> ⏩ 如果你只需要提取测试向量，跳到 §7
+
 本文件是 `protocol-integration-workflow` 的 **Phase 0 补充**。
 目标：把一份 PDF / Word / Markdown 格式的协议文档，系统性地转化为实现所需的全部结构化信息。
 
@@ -26,23 +29,7 @@
 ### 1.1 PDF 文档
 
 PDF 是协议文档最常见的格式，也是信息提取最困难的格式。按优先级选择工具：
-
-**首选：pymupdf（fitz）**
-
-```bash
-pip install pymupdf
-```
-
-```python
-import fitz
-doc = fitz.open("protocol_v2.0.pdf")
-full_text = ""
-for page in doc:
-    full_text += page.get_text() + "\n--- PAGE BREAK ---\n"
-Path("protocol_v2.0_extracted.txt").write_text(full_text, encoding="utf-8")
-```
-
-**备选：pdfplumber（表格提取更强）**
+**首选：pdfplumber（表格提取更强）**
 
 pdfplumber 对表格的提取质量优于 pymupdf，但文字提取速度较慢。建议先用 pymupdf 提取全文，再用 pdfplumber 专门处理表格页。
 

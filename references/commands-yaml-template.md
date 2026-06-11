@@ -1,5 +1,11 @@
 # 从协议文档到 commands.yaml 的精确模板
 
+> 📏 ~5,200 tokens | 必读等级: ★★★（Phase 1 必须）| 前置: SKILL.md §2
+> ⏩ 固定 schema 协议 → 读 §1-11；TLV 自描述协议 → 从 §12 开始；表具行业 → 追加 §13
+
+前置阅读：`SKILL.md` §2（`PackContext` / `UnpackResult` / `decoded_fields_mode` 三种模式）。
+编写 `commands.yaml` 时需要理解 `decoded_fields_mode` 如何决定字段解析策略。
+
 配合 `protocol-integration-workflow` 和 `document-analysis-workflow.md` 使用。
 本文档覆盖从协议文档中的命令表到可用的 `commands.yaml` 的完整转换流程。
 
@@ -134,6 +140,31 @@ commands:
           length: 1
 ```
 
+**主动上报帧的匹配逻辑**：
+
+主动上报帧不由 host 的 `send()` 触发，而是由设备推送到接收管线。
+Channel 的匹配流程与响应帧完全相同——通过 `command_id` 在 CommandStore 中查找：
+
+```
+设备推送帧 → transport 回调 → codec.unpack() 返回 command_id
+  → CommandStore.get_by_id(command_id) → 找到命令定义
+  → 取 response.fields → BinaryFormatter 反序列化 → GUI 展示
+```
+
+**关键点**：
+- CommandStore 是按 `command_id` 索引的，不区分 request/response
+- 只定义了 response 的命令，其 `command_id` 仍然参与索引
+- 如果主动上报帧和某个请求帧使用了相同的 `command_id`：
+  - ProtocolChannel 会同时匹配到 request 和 response 两侧定义
+  - 解析时取 `fields` 来自 response 侧（因为 direction 是上行）
+  - **建议**：主动上报帧使用独立的 command_id（如 0x8001~0x8FFF），避免与请求帧的 command_id 冲突
+
+**主动上报帧的 session_updates 处理**：
+- 主动上报帧可能携带设备状态变化（如报警状态、表型信息）
+- codec 的 `unpack()` 中应按需提取这些信息写入 `session_updates`
+- 与注册帧不同的是：主动上报帧可能**多次到达**，`session_updates` 中的值会持续被最新值覆盖
+- 如果主动上报帧和注册帧都在更新 `meter_type`：后者覆盖前者，以最后一次收到的为准
+
 ### 4.3 双向命令（最常见）
 
 大部分协议命令有 request 和 response：
@@ -185,8 +216,12 @@ commands:
 | `unit` | - | string | 物理单位，仅用于 GUI 展示 |
 | `scale` | - | string/float | 缩放系数，传输值 × scale = 实际值 |
 | `enum_values` | enum时 | dict | 枚举映射 `{"0": "停止", "1": "运行"}` |
-| `bits` | bitfield时 | list | 位域定义 `[{name, bit, description}]` |
+| `bits` | bitfield时 | list | 位域定义 `[{name, start_bit, description, values?}]` |
 | `dynamic` | raw_hex时 | bool | `true` 表示变长 hex |
+| `encoding` | datetime时 | string | `"bcd"` (默认) 或 `"hex"`，控制日期时间的编解码方式 |
+| `signed_layout` | bcd时 | bool | 启用有符号 BCD 布局，`length==8` 时自动为 `true` |
+| `integer_bytes` | bcd时 | int | 有符号 BCD 整数部分字节数，默认 4 (length=8) |
+| `decimal_bytes` | bcd时 | int | 有符号 BCD 小数部分字节数，默认 3 (length=8) |
 | `range` | - | string | 值范围限制，如 `"0..255"` |
 
 ### 5.2 典型字段定义示例
@@ -250,9 +285,9 @@ commands:
   length: 4
   byte_order: big
   bits:
-    - {name: "gpio_write",  bit: 0}
-    - {name: "gpio_read",   bit: 1}
-    - {name: "adc_once",    bit: 2}
+    - {name: "gpio_write",  start_bit: 0}
+    - {name: "gpio_read",   start_bit: 1}
+    - {name: "adc_once",    start_bit: 2}
     # ... bit3~31
   description: 硬件能力位图
 ```
@@ -264,6 +299,27 @@ commands:
   length: 1
   default: "0"
   description: 保留，发送端填 0
+```
+
+**有符号 BCD**：
+```yaml
+- name: 剩余金额
+  type: bcd
+  length: 8
+  signed_layout: true
+  integer_bytes: 4
+  decimal_bytes: 3
+  unit: 元
+  description: "有符号 BCD，8字节=1字节符号+4字节整数+3字节小数"
+```
+
+**日期时间（HEX 编码）**：
+```yaml
+- name: 校时时间
+  type: yymmddhhmmss
+  length: 6
+  encoding: hex
+  description: 每字节存十进制值（非 BCD）
 ```
 
 ---
@@ -318,18 +374,18 @@ fields:
 
 ```yaml
 instruction_attributes:
-  security_mode:
+  security_mode:             # 示例：安全策略覆盖
     values: [auto, plain_mac, cipher_mac, none]
     codec_override: true
-  mid_policy_override:
-    values: [auto_increment, echo_last_terminal_mid, manual]
-    codec_override: true
-  operation_mode:
-    values: [normal, maintenance, calibration]
+  operation_mode:            # 示例：操作模式（Read/Write/Write-Read）
+    values: [Read, Write, Write-Read]
     codec_override: true
 ```
 
-被标记 `codec_override: true` 的属性在 ProtocolChannel 发送时从 field_data 中剥离，传给 `PackContext.overrides`，不参与 BinaryFormatter 序列化。
+被标记 `codec_override: true` 的属性在 ProtocolChannel 发送时从 field_data 中剥离，
+传给 `PackContext.overrides`，不参与 BinaryFormatter 序列化。
+
+**注意**：`instruction_attributes` 是**可选的**。如果你的协议没有特殊指令属性，不需要定义这个段。
 
 ---
 
@@ -382,9 +438,9 @@ commands:
           length: 4
           byte_order: big
           bits:
-            - {name: "gpio_write",  bit: 0}
-            - {name: "gpio_read",   bit: 1}
-            - {name: "adc_once",    bit: 2}
+            - {name: "gpio_write",  start_bit: 0}
+            - {name: "gpio_read",   start_bit: 1}
+            - {name: "adc_once",    start_bit: 2}
         - name: 构建时间
           type: uint32
           length: 4
@@ -519,6 +575,10 @@ def build_commands_yaml(index_csv, fields_dir):
 ---
 
 ## 12. TLV / 自描述载荷的处理策略
+
+> **相关**：如果同一命令在不同表型下返回不同的 TLV Tag 集合，这是**数据域多态**问题。
+> 处理策略（决定性参数 → 会话状态 → 条件解析）详见 `references/data-domain-polymorphism.md`。
+> 本章覆盖的是"TLV 字段可选/乱序"的通用处理。
 
 第 6 节"字段顺序 = 字节顺序"适用于**固定 schema** 协议——每个字段按固定偏移出现在帧中。
 当协议使用 **TLV（Tag-Length-Value）**、**key-value**、**Tagged Union** 等自描述格式时，
@@ -741,6 +801,9 @@ Phase 0 产出: 协议文档分析 → 整理出所有 TLV Tag 及其子记录�
 ---
 
 ## 13. 表具行业敏感数据强制解析规则
+
+> **相关**：当不同表型的计量数据字段集有差异时，这是**数据域多态**问题。
+> 本章的"逐字段独立定义"配合 `references/data-domain-polymorphism.md` 的"条件解析"模式，共同构成完整的表具多态数据处理方案。
 
 **适用范围**：燃气表、水表、热量表、电表等表具行业协议。
 
